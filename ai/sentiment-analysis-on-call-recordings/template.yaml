@@ -1,23 +1,6 @@
+# This basic CloudFormation template is used in temporary EventEngine accounts... The permissions are probably
+# more generous than you'd want to grant in a production account!
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Template to create a pipeline for transcribe and comprehend (sentiment
-  analysis)
-Outputs:
-  ComprehendOutputLocation:
-    Description: S3 sentiment analysis location.
-    Export:
-      Name:
-        Fn::Sub: ${AWS::StackName}-ComprehendS3Uri
-    Value:
-      Fn::Join:
-      - ''
-      - - s3://
-        - Ref: SrcBucket
-        - /comprehend/
-  S3Bucket:
-    Description: S3 bucket where recordings, transcriptions and comprehensions will
-      be stored
-    Value:
-      Ref: SrcBucket
 Parameters:
   RecordingsPrefix:
     Default: recordings/
@@ -32,6 +15,75 @@ Parameters:
     Description: Name of folder where transcripts would be stored
     Type: String
 Resources:
+  SageMakerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+        - "arn:aws:iam::aws:policy/service-role/AmazonPersonalizeFullAccess"
+        - "arn:aws:iam::aws:policy/IAMFullAccess"
+        - "arn:aws:iam::aws:policy/AWSLambda_FullAccess"
+        - "arn:aws:iam::aws:policy/ComprehendFullAccess"
+        - "arn:aws:iam::aws:policy/TranslateFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonTranscribeFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonFraudDetectorFullAccessPolicy"
+      Policies:
+        - PolicyName: AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: EventAccess
+              Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+              Resource:
+                - arn:aws:ssm:*:*:parameter/aiml-lab/*
+            - Sid: RekognitionAccess
+              Effect: Allow
+              Action:
+                - rekognition:*
+              Resource: "*"              
+
+  # SageMaker notebook
+  NotebookConfig:
+    Type: AWS::SageMaker::NotebookInstanceLifecycleConfig
+    Properties:
+      NotebookInstanceLifecycleConfigName: !Sub '${AWS::StackName}-LifecycleConfig'
+      OnStart:
+        - Content:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              set -e
+
+              # Install extension for ipywidgets interactivity:
+              sudo -u ec2-user -i <<'EOF'
+              source /home/ec2-user/anaconda3/bin/activate JupyterSystemEnv
+              jupyter labextension install @jupyter-widgets/jupyterlab-manager
+              source /home/ec2-user/anaconda3/bin/deactivate
+              EOF
+
+  NotebookInstance:
+    Type: AWS::SageMaker::NotebookInstance
+    Properties:
+      InstanceType: ml.t2.medium
+      LifecycleConfigName: !GetAtt NotebookConfig.NotebookInstanceLifecycleConfigName
+      # Otherwise it gets some garbage name by default:
+      NotebookInstanceName: !Sub '${AWS::StackName}-Notebook'
+      RoleArn: !GetAtt SageMakerIamRole.Arn
+      VolumeSizeInGB: 20
+      DefaultCodeRepository: https://github.com/tom5610/ai-ml-workshop.git
+
   ComprehendGlueDatabase:
     Properties:
       CatalogId:
@@ -381,6 +433,14 @@ Resources:
         - S3BucketNameResource
         - BucketName
     Type: AWS::S3::Bucket
+
+  SentimentAnalysisS3BucketNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /aiml-lab/sentiment_analysis_s3_bucket_name
+      Type: String
+      Value: !Ref SrcBucket
+
   StartTranscribeExecutionLambda:
     Properties:
       CodeUri: s3://aws-machine-learning-blog/artifacts/sentiment-analysis-on-call-recordings/StartTranscribeExecutionLambda.zip
